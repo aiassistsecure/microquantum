@@ -13,24 +13,36 @@ CHECKPOINT_EVERY = 1  # slice 1: checkpoint every step (cheap at demo scale);
 
 
 class Circuit:
-    def __init__(self, n_qubits: int, store: JournalStore | None = None, _state: StateVector | None = None):
+    def __init__(self, n_qubits: int, store: JournalStore | None = None,
+                 _state: StateVector | None = None, backend="numpy",
+                 backend_fallback: bool = False):
+        """``backend``: "numpy" (default) or "cupy". Requesting cupy when
+        unavailable raises BackendUnavailableError unless
+        ``backend_fallback=True`` (explicit NumPy fallback, never silent).
+        Journal/checkpoints always store host NumPy arrays."""
         self.n = n_qubits
         self.store = store
-        self.state = _state or StateVector(n_qubits)
+        self.state = _state or StateVector(n_qubits, backend=backend,
+                                           backend_fallback=backend_fallback)
         self.journal: list[dict] = []  # in-memory mirror of journal entries
         if self.store is not None:
-            # genesis checkpoint for |0...0>
-            self._genesis_hash = self.store.put_checkpoint(self.state.psi)
+            self._genesis_hash = self.store.put_checkpoint(self.state.to_numpy())
 
-    # -- backend seam ------------------------------------------------------
-    # All gate math goes through StateVector (NumPy). A CuPy backend for the
-    # V100 only has to provide the same apply_1q/apply_2q/cnot/cz/swap surface
-    # on a device array; Circuit and the journal do not change.
+    @property
+    def backend(self):
+        return self.state.backend
+
+    @property
+    def backend_name(self) -> str:
+        return self.state.backend_name
+
+    # Backend seam: gate math goes through StateVector's backend
+    # (microq.backend); Circuit and the journal APIs are unchanged.
 
     # -- gate application (journaled) --------------------------------------
     def _record(self, gate: str, targets: list[int], params: tuple[float, ...] = ()) -> dict:
         if self.store is not None:
-            entry = self.store.append(gate, targets, list(params), self.state.psi)
+            entry = self.store.append(gate, targets, list(params), self.state.to_numpy())
         else:
             seq = len(self.journal) + 1
             entry = {
@@ -38,7 +50,7 @@ class Circuit:
                 "gate": gate,
                 "targets": list(targets),
                 "params": list(params),
-                "state_hash": state_hash(self.state.psi),
+                "state_hash": state_hash(self.state.to_numpy()),
                 "timestamp": None,
             }
         self.journal.append(entry)
@@ -84,7 +96,7 @@ class Circuit:
         return self.state.sample(shots, rng=rng)
 
     def current_hash(self) -> str:
-        return state_hash(self.state.psi)
+        return state_hash(self.state.to_numpy())
 
     # -- time travel ---------------------------------------------------------
     def _checkpoint_hash_at(self, seq: int) -> str:
@@ -102,7 +114,7 @@ class Circuit:
             raise ValueError("rewind needs a persistent JournalStore")
         h = self._checkpoint_hash_at(seq)
         psi = self.store.get_checkpoint(h)
-        self.state = StateVector(self.n, psi)
+        self.state = StateVector(self.n, psi, backend=self.state.backend)
         self.journal = self.journal[:seq]
         return self
 
@@ -113,14 +125,15 @@ class Circuit:
         if self.store is None:
             raise ValueError("fork needs a persistent JournalStore")
         if seq is None:
-            psi = self.state.psi.copy()
+            psi = self.state.to_numpy().copy()
             hist = list(self.journal)
         else:
             psi = self.store.get_checkpoint(self._checkpoint_hash_at(seq))
             hist = list(self.journal[:seq])
         child_store_root = Path(self.store.root) / f"fork-{len(list(Path(self.store.root).glob('fork-*')))}-{seq if seq is not None else 'head'}"
         child_store = JournalStore(child_store_root)
-        child = Circuit(self.n, store=child_store, _state=StateVector(self.n, psi))
+        child = Circuit(self.n, store=child_store,
+                        _state=StateVector(self.n, psi, backend=self.state.backend))
         child.journal = hist
         for e in hist:  # fork history is the parent's chain prefix, persisted
             child_store.import_entry(e)
@@ -130,8 +143,8 @@ class Circuit:
         """Re-apply the journal from |0...0> and verify the final state hash
         matches the journaled head hash — the provenance proof."""
         if not self.journal:
-            return self.current_hash() == state_hash(StateVector(self.n).psi)
-        fresh = Circuit(self.n)  # in-memory, unjournaled store
+            return self.current_hash() == state_hash(StateVector(self.n).to_numpy())
+        fresh = Circuit(self.n, backend=self.state.backend)
         for e in self.journal:
             fresh.apply(e["gate"], *e["targets"], params=tuple(e["params"]))
         return fresh.current_hash() == self.journal[-1]["state_hash"]
