@@ -82,6 +82,9 @@ entry schema and hash chain (`JournalStore.backend` reports which).
 - `microq/search.py` — S4 NEDB record store + data-driven Grover search.
 - `microq/qft.py` — S5 QFT / inverse QFT + quantum phase estimation,
   built from journaled H/CP/SWAP gates (CP added to `circuit.py`).
+- `microq/vqe.py` — S6 VQE-style variational loop: RY/CNOT ansatz,
+  exact expectations, NumPy Nelder–Mead, journaled parameter
+  checkpoints in NEDB, rollback to best-so-far via rewind.
 - `tests/test_microq.py` — pytest suite (see SLICE1-RESULTS.md).
 
 ## Backends (S3)
@@ -144,6 +147,21 @@ MSB; the tests verify the QFT unitary against the direct DFT matrix
 and the QPE bit ordering empirically rather than assuming a
 convention. Still classical simulation: no hardware, no speedup.
 
+## Variational loop (S6)
+
+`microq/vqe.py` runs a VQE-style loop on a fixed 2-qubit Hamiltonian
+(`ZZ + 0.6 XX + 0.4 YY - 0.5 ZI + 0.2 IZ`, exact ground energy from
+`eigvalsh`): a 4-parameter RY/CNOT ansatz built only from journaled
+Circuit gates, expectation values computed **exactly** from the state
+vector (no sampling), and a deterministic Nelder–Mead optimizer in
+pure NumPy. Every evaluation persists a parameter checkpoint
+(params + energy + state hash) into NEDB on the journal's database;
+after the loop, best-so-far is restored via `Circuit.rewind` to that
+iteration's checkpoint and proved by state hash, recovered params,
+and re-evaluated energy. Demo F (`python -m microq.demos`) runs it
+end to end. Still classical simulation of quantum math: no quantum
+hardware, no speedup claims, and V100 numbers remain UNMEASURED.
+
 ## Run it
 
 ```bash
@@ -167,5 +185,6 @@ python -m pytest tests/ -q
 5. ~~More algorithms as journaled demos (QFT, phase estimation)~~ —
    done in S5 (see above; each with replay proofs). Further algorithms
    remain welcome as journaled demos.
-6. Variational loop (VQE-style) with journaled parameter checkpoints
-   and rollback to best-so-far via time travel.
+6. ~~Variational loop (VQE-style) with journaled parameter checkpoints
+   and rollback to best-so-far via time travel~~ — done in S6 (see
+   above; checkpoints in NEDB, rollback proved by hash/params/energy).
