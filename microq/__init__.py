@@ -6,9 +6,11 @@ hardware and claims no quantum speedup.
 """
 from .backend import BackendUnavailableError, CupyBackend, NumpyBackend, get_backend
 from .circuit import Circuit
+from .debug import diff_states, inspect_at
 from .journal import JournalStore, state_hash
 from .state import StateVector
 
 __all__ = ["Circuit", "JournalStore", "StateVector", "state_hash",
+           "inspect_at", "diff_states",
            "NumpyBackend", "CupyBackend", "get_backend", "BackendUnavailableError"]
 __version__ = "0.1.0"
