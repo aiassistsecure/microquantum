@@ -122,9 +122,36 @@ def grover(marked: str = "1011", iterations: int = 3) -> Circuit:
     return c
 
 
+def grover_nedb(target_tag: str = "gold", iterations: int = 3):
+    """Demo D (S4): Grover over records actually stored in NEDB.
+
+    The marked state is derived from the record read back out of NEDB —
+    classical simulation of quantum math, no hardware, no speedup."""
+    from .search import grover_search_nedb
+
+    print("=== Demo D: Grover search over NEDB records (S4) ===")
+    root = DATA / "grover_nedb"
+    if root.exists():
+        shutil.rmtree(root)
+    r = grover_search_nedb(root, target_tag, iterations=iterations)
+    print(f"  records seeded into NEDB: {r['records_seeded']}; record DB verify: {r['record_db_verify']}")
+    print(f"  queried tag: {target_tag!r}")
+    print(f"  record found in NEDB: {r['record']}")
+    print(f"  marked bits derived from its stored index: {r['marked']}")
+    print(f"  P(marked) before iterations: {r['p_marked_before']:.4f}")
+    print(f"  P(marked) after {iterations} iterations: {r['p_marked_after']:.4f}")
+    print(f"  top sample (6-bit: search+ancillas): {r['top_sample']}")
+    print(f"  journal length: {r['journal_length']} entries")
+    print(f"  replay() reproduces final state: {r['replay']}")
+    print(f"  journal hash chain verifies: {r['journal_chain_verify']}")
+    return r
+
+
 if __name__ == "__main__":
     bell()
     print()
     ghz()
     print()
     grover()
+    print()
+    grover_nedb()

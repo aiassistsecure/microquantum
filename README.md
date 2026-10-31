@@ -76,7 +76,9 @@ entry schema and hash chain (`JournalStore.backend` reports which).
 - `microq/circuit.py` — journaled Circuit: apply, rewind, fork, replay.
 - `microq/journal.py` — JSONL journal + content-addressed checkpoints,
   hash-chain verification.
-- `microq/demos.py` — Bell state, GHZ-5, Grover search over 16 "records".
+- `microq/demos.py` — Bell state, GHZ-5, Grover search over 16 "records",
+  plus Demo D: Grover over records stored in NEDB (S4).
+- `microq/search.py` — S4 NEDB record store + data-driven Grover search.
 - `tests/test_microq.py` — pytest suite (see SLICE1-RESULTS.md).
 
 ## Backends (S3)
@@ -104,6 +106,24 @@ c = Circuit(2, backend="cupy")    # CuPy/CUDA on a GPU host (e.g. V100)
   This remains classical simulation — a GPU backend only runs the same
   linear algebra faster, it is not quantum hardware.
 
+## Grover over NEDB records (S4)
+
+`microq/search.py` seeds 16 deterministic records (`{index, name, tag}`)
+into a **real NEDB** database (`records` collection, keyed by
+`str(index)`, in a separate NEDB path from the circuit journal store).
+`grover_search_nedb(root, target_tag)` reads the matching record back
+out of NEDB, derives the marked bitstring from that record's *stored*
+index, and builds the Grover oracle (the S1 oracle/diffuser, reused)
+from the derived string. It returns the found record, `P(marked)`
+before/after, the journal length, `replay()`, and both verify results
+(record-DB `verify()` and the journal hash chain).
+
+Demo D (`python -m microq.demos`) runs this end to end. Honest framing
+again: the lookup that finds the record scans NEDB directly and is
+faster than the simulated search — there is no quantum speedup here;
+the point is an oracle that is genuinely data-driven from NEDB, on a
+fully journaled, replay-verifiable circuit.
+
 ## Run it
 
 ```bash
@@ -118,9 +138,13 @@ python -m pytest tests/ -q
 
 1. ~~CuPy/CUDA backend for the V100~~ — done in S3 (see Backends above;
    V100 numbers UNMEASURED until run at the box).
-2. NEDB AS OF / TRACE reads surfaced in the circuit API (rewind already
+2. ~~Grover search over records actually stored in NEDB~~ — done in S4
+   (see above; oracle derived from the record read back out of NEDB).
+3. NEDB AS OF / TRACE reads surfaced in the circuit API (rewind already
    restores checkpoints; expose `get_as_of` provenance queries next).
-3. Checkpoint striding (checkpoint every k gates + replay-forward on
+4. Checkpoint striding (checkpoint every k gates + replay-forward on
    rewind) once circuits get long enough that per-gate checkpoints hurt.
-4. More algorithms as journaled demos (QFT, phase estimation), each with
+5. More algorithms as journaled demos (QFT, phase estimation), each with
    replay proofs.
+6. Variational loop (VQE-style) with journaled parameter checkpoints
+   and rollback to best-so-far via time travel.
