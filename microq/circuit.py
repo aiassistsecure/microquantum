@@ -64,6 +64,14 @@ class Circuit:
             self.state.cnot(targets[0], targets[1])
         elif gate == "CZ":
             self.state.cz(targets[0], targets[1])
+        elif gate == "CP":
+            if len(targets) != 2:
+                raise ValueError("CP needs (control, target)")
+            if len(params) != 1:
+                raise ValueError("CP needs exactly one angle param (theta)")
+            theta = float(params[0])
+            mat = np.diag([1, 1, 1, np.exp(1j * theta)]).astype(np.complex128)
+            self.state.apply_2q(mat, targets[0], targets[1])
         elif gate == "SWAP":
             self.state.swap(targets[0], targets[1])
         else:
@@ -85,6 +93,7 @@ class Circuit:
     def rz(self, q: int, theta: float): return self.apply("RZ", q, params=(theta,))
     def cnot(self, c: int, t: int): return self.apply("CNOT", c, t)
     def cz(self, a: int, b: int): return self.apply("CZ", a, b)
+    def cp(self, a: int, b: int, theta: float): return self.apply("CP", a, b, params=(theta,))
     def swap(self, a: int, b: int): return self.apply("SWAP", a, b)
 
     # -- observation ---------------------------------------------------------
