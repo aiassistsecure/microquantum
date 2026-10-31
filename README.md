@@ -113,13 +113,14 @@ but records no hash chain, so its `trace` reports `verified` as
 - `microq/vqe.py` — S6 VQE-style variational loop: RY/CNOT ansatz,
   exact expectations, NumPy Nelder–Mead, journaled parameter
   checkpoints in NEDB, rollback to best-so-far via rewind.
-- `microq/debug.py` — D1 debugger inspection core: `inspect_at` /
-  `diff_states` over journaled states (see Debugger below).
+- `microq/debug.py` — debugger core: `inspect_at` / `diff_states`
+  (D1) and `find_divergence` bisection (D2) over journaled states
+  (see Debugger below).
 - `tests/test_microq.py` — pytest suite (see SLICE1-RESULTS.md).
 
-## Debugger (D1)
+## Debugger (D1–D2)
 
-`microq/debug.py` is the inspection core of the debugger line:
+`microq/debug.py` is the core of the debugger line:
 
 - `inspect_at(circuit, seq)` — the full state at journal `seq`:
   per-qubit reduced density matrices, Bloch vectors, and entanglement
@@ -129,16 +130,48 @@ but records no hash chain, so its `trace` reports `verified` as
 - `diff_states(circuit, seq_a, seq_b)` — fidelity
   (|⟨psi_a|psi_b⟩|^2), per-amplitude / per-probability deltas, and
   the largest movers between two journal points.
+- `find_divergence(circuit_a, circuit_b, tolerance=1e-9)` (D2) —
+  **binary-searches** the common journal prefix for the first `seq`
+  where the two circuits' states diverge: fidelity
+  |⟨psi_a|psi_b⟩|^2 `< 1 - tolerance`. It returns that `seq`, the
+  fidelity and state hashes there, both gate entries, and
+  `suspect_gate` — the gate entry at that seq from `circuit_b` (the
+  presumed mutated circuit; falling back to `circuit_a` if b has no
+  such entry) — so a planted wrong angle or wrong target is named
+  directly, not just located approximately.
 
 States are obtained by **checkpoint restore** (`store.get_checkpoint`
 on the journal entry's `state_hash`, the genesis checkpoint for
 `seq 0`), never by re-running gates when a checkpoint exists, and
-inspection never mutates the circuit. A storeless circuit has no
-checkpoints to restore, so both functions raise `ValueError` for one
-rather than silently replaying. Limits, stated plainly: this is
-classical state-vector simulation (no quantum hardware), inspection
-costs the same exponential memory as the state itself, and V100
-performance is UNMEASURED.
+inspection never mutates either circuit. A storeless circuit has no
+checkpoints to restore, so all three functions raise `ValueError`
+for one rather than silently replaying. Circuits with different
+qubit counts also raise `ValueError` (states incomparable).
+
+`find_divergence` behaviour at the edges, stated plainly:
+
+- Identical circuits (or an identical prefix of equal length) report
+  `diverged=False, seq=None`. The decision is fidelity-based: equal
+  state hashes are only a fast path to fidelity 1, and a hash
+  difference whose fidelity stays within `tolerance` (e.g. a
+  negligibly different rotation angle) still reports no divergence.
+- Differing lengths with an agreeing common prefix diverge at
+  `seq = min_len + 1`, with the longer circuit's first extra gate as
+  the suspect and `fidelity=None` — there is no counterpart state to
+  compare, so no fidelity is fabricated.
+- `seq == 0` means the genesis states themselves differ (possible
+  for a fork, whose genesis is its fork-point state).
+- The binary search assumes divergence, once present, persists to
+  the end of the common prefix. Under that assumption the returned
+  seq is the first divergent one (the seq before it is verified
+  within tolerance). If states diverged and then reconverged within
+  tolerance, the search could miss the transient divergence or
+  report a later seq — no stronger guarantee is claimed.
+
+Limits, stated plainly: this is classical state-vector simulation
+(no quantum hardware), inspection and comparison cost the same
+exponential memory as the state itself, and V100 performance is
+UNMEASURED.
 
 ## Backends (S3)
 
