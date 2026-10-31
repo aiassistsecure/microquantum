@@ -122,9 +122,12 @@ class JournalStore:
         self._persist(dict(entry))
         self.entries.append(dict(entry))
 
-    def verify_chain(self) -> bool:
+    @staticmethod
+    def _verify_entries(entries: list[dict]) -> bool:
+        """Verify the microquantum hash chain over an ordered entry list
+        (a whole journal or any prefix of one)."""
         prev = "0" * 64
-        for i, e in enumerate(self.entries, start=1):
+        for i, e in enumerate(entries, start=1):
             if e["seq"] != i or e["prev_hash"] != prev:
                 return False
             body = {k: v for k, v in e.items() if k != "entry_hash"}
@@ -132,6 +135,82 @@ class JournalStore:
                 return False
             prev = e["entry_hash"]
         return True
+
+    def verify_chain(self) -> bool:
+        return self._verify_entries(self.entries)
+
+    # -- provenance reads (AS OF / TRACE, in journal seq) ------------------
+    # Seq distinction, stated plainly: every `seq` below is the
+    # *microquantum journal seq* (1-based position in this circuit's
+    # journal). It is NOT NEDB's global op seq: NEDB's native
+    # ``get(coll, id, as_of=N)`` interprets N against NEDB's own
+    # store-wide sequence, where writes to other collections interleave,
+    # so passing a journal seq there would read the wrong point in time.
+    # Journal entries are keyed ``str(journal_seq)`` and each key is
+    # written exactly once, so a plain per-key get IS the as-of read for
+    # that journal seq, and a prefix of per-key gets plus microquantum
+    # chain verification gives correct journal-seq AS OF / TRACE
+    # semantics without ever conflating the two sequences.
+    def _stored_entry(self, seq: int) -> dict | None:
+        """One journal entry sourced from the backing store: a per-key
+        NEDB get (``_``-prefixed NEDB fields stripped, as in
+        `_load_from_nedb`) when NEDB-backed, else the in-memory/JSONL
+        entries. Returns a copy, or None if the key is absent."""
+        if self.db is not None:
+            doc = self.db.get("journal", str(seq))
+            if doc is None:
+                return None
+            return {k: v for k, v in doc.items() if not k.startswith("_")}
+        if 1 <= seq <= len(self.entries):
+            return dict(self.entries[seq - 1])
+        return None
+
+    @staticmethod
+    def _check_journal_seq(seq, head: int) -> None:
+        if not isinstance(seq, int) or isinstance(seq, bool):
+            raise ValueError(f"journal seq must be an int, got {seq!r}")
+        if seq < 0 or seq > head:
+            raise ValueError(f"journal seq {seq} out of range 0..{head}")
+
+    def entry_as_of(self, seq: int) -> dict | None:
+        """The journal entry as of journal `seq` (see the seq-distinction
+        note above: journal seq, not NEDB's global op seq).
+
+        `seq == 0` is genesis — there is no entry yet — and returns
+        None. Any other out-of-range seq raises ValueError."""
+        self._check_journal_seq(seq, len(self.entries))
+        if seq == 0:
+            return None
+        entry = self._stored_entry(seq)
+        if entry is None:  # in range per the mirror, but missing in store
+            raise ValueError(f"journal entry {seq} missing from store")
+        return entry
+
+    def trace(self, seq: int | None = None) -> dict:
+        """TRACE: the ordered chain prefix leading to journal `seq`
+        (default: the head), with the prefix's hash chain verified.
+
+        Returns ``{seq, entries, verified, head_hash, state_hash}``.
+        `seq == 0` is genesis: an empty prefix, vacuously verified,
+        `head_hash` the genesis sentinel ``"0" * 64`` and
+        `state_hash` None (no gate has run). Out-of-range raises
+        ValueError."""
+        if seq is None:
+            seq = len(self.entries)
+        self._check_journal_seq(seq, len(self.entries))
+        entries = []
+        for i in range(1, seq + 1):
+            entry = self._stored_entry(i)
+            if entry is None:
+                raise ValueError(f"journal entry {i} missing from store")
+            entries.append(entry)
+        return {
+            "seq": seq,
+            "entries": entries,
+            "verified": self._verify_entries(entries),
+            "head_hash": entries[-1]["entry_hash"] if entries else "0" * 64,
+            "state_hash": entries[-1]["state_hash"] if entries else None,
+        }
 
     def verify_store(self) -> bool | None:
         """NEDB's own chain verification, when the real engine backs us."""
