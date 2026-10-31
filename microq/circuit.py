@@ -107,6 +107,44 @@ class Circuit:
     def current_hash(self) -> str:
         return state_hash(self.state.to_numpy())
 
+    # -- provenance reads (AS OF / TRACE, in journal seq) ------------------
+    # `seq` here is this circuit's journal seq, NOT NEDB's global op
+    # seq — see the seq-distinction note in microq/journal.py. The
+    # circuit's view is bounded by its own journal (e.g. after rewind),
+    # even when the backing store still holds later entries.
+    def as_of(self, seq: int) -> dict | None:
+        """The journal entry as of journal `seq`: seq 0 (genesis)
+        returns None; out of range raises ValueError. Store-backed
+        circuits source the entry from the store via
+        `JournalStore.entry_as_of`."""
+        JournalStore._check_journal_seq(seq, len(self.journal))
+        if seq == 0:
+            return None
+        if self.store is not None:
+            return self.store.entry_as_of(seq)
+        return dict(self.journal[seq - 1])
+
+    def trace(self, seq: int | None = None) -> dict:
+        """The ordered, chain-verified journal prefix leading to `seq`
+        (default: this circuit's head), in the same result shape as
+        `JournalStore.trace`. Storeless circuits record no hash chain,
+        so a non-empty storeless trace reports `verified` as None
+        rather than making a claim it cannot back."""
+        if seq is None:
+            seq = len(self.journal)
+        JournalStore._check_journal_seq(seq, len(self.journal))
+        if self.store is not None:
+            return self.store.trace(seq)
+        entries = [dict(e) for e in self.journal[:seq]]
+        chained = all("entry_hash" in e and "prev_hash" in e for e in entries)
+        return {
+            "seq": seq,
+            "entries": entries,
+            "verified": JournalStore._verify_entries(entries) if chained else None,
+            "head_hash": entries[-1].get("entry_hash", "0" * 64) if entries else "0" * 64,
+            "state_hash": entries[-1]["state_hash"] if entries else None,
+        }
+
     # -- time travel ---------------------------------------------------------
     def _checkpoint_hash_at(self, seq: int) -> str:
         if seq == 0:

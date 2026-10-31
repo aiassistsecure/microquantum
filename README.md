@@ -67,15 +67,43 @@ blobs by reference). If the `nedb` binding is ever unavailable,
 `JournalStore` degrades to an append-only JSONL journal with the identical
 entry schema and hash chain (`JournalStore.backend` reports which).
 
+## Provenance reads (AS OF / TRACE)
+
+The journal can be read back at any point in its history, not just
+rewound:
+
+- `store.entry_as_of(seq)` / `circuit.as_of(seq)` — the journal entry
+  as of that point: its gate, targets, params, and the `state_hash`
+  the circuit actually had then. `seq == 0` is genesis (no entry yet)
+  and returns `None`; any other out-of-range seq raises `ValueError`.
+- `store.trace(seq=None)` / `circuit.trace(seq=None)` — the ordered
+  chain prefix leading to `seq` (default: the head), returned as
+  `{seq, entries, verified, head_hash, state_hash}`, where `verified`
+  is the microquantum hash-chain check run over exactly that prefix.
+
+One seq distinction matters here. These reads take the **microquantum
+journal seq** (position in this circuit's journal). NEDB's native
+`get(coll, id, as_of=N)` instead takes NEDB's **global op seq**, where
+writes to other collections interleave — the two numbers are not
+interchangeable, and passing a journal seq to NEDB's `as_of` would
+read the wrong point in time. microquantum never does that: journal
+entries are keyed `str(journal_seq)` and each key is written exactly
+once, so a plain per-key get *is* the as-of read for that journal seq,
+and a prefix of per-key gets plus chain verification gives correct
+TRACE semantics. (A storeless in-memory circuit can answer `as_of`,
+but records no hash chain, so its `trace` reports `verified` as
+`None` rather than claiming a check it cannot run.)
+
 ## Layout
 
 - `microq/backend.py` — S3 backend interface: `NumpyBackend` (default)
   and import-guarded `CupyBackend`, resolution via `get_backend`.
 - `microq/state.py` — state-vector engine (H, X, Y, Z, S, T, S†, T†,
   RX/RY/RZ, CNOT, CZ, SWAP via reshape/tensordot), sampling, fidelity.
-- `microq/circuit.py` — journaled Circuit: apply, rewind, fork, replay.
-- `microq/journal.py` — JSONL journal + content-addressed checkpoints,
-  hash-chain verification.
+- `microq/circuit.py` — journaled Circuit: apply, rewind, fork, replay,
+  AS OF / TRACE provenance reads (`as_of` / `trace`).
+- `microq/journal.py` — NEDB journal (JSONL fallback) + content-addressed
+  checkpoints, hash-chain verification, `entry_as_of` / `trace` reads.
 - `microq/demos.py` — Bell state, GHZ-5, Grover search over 16 "records",
   Demo D: Grover over records stored in NEDB (S4), plus Demo E:
   QFT + quantum phase estimation (S5).
@@ -178,8 +206,10 @@ python -m pytest tests/ -q
    V100 numbers UNMEASURED until run at the box).
 2. ~~Grover search over records actually stored in NEDB~~ — done in S4
    (see above; oracle derived from the record read back out of NEDB).
-3. NEDB AS OF / TRACE reads surfaced in the circuit API (rewind already
-   restores checkpoints; expose `get_as_of` provenance queries next).
+3. ~~NEDB AS OF / TRACE reads surfaced in the circuit API~~ — done
+   (see Provenance reads above; journal-seq `entry_as_of` / `as_of`
+   and `trace`, chain-verified prefixes, never conflated with NEDB's
+   global op seq).
 4. Checkpoint striding (checkpoint every k gates + replay-forward on
    rewind) once circuits get long enough that per-gate checkpoints hurt.
 5. ~~More algorithms as journaled demos (QFT, phase estimation)~~ —
