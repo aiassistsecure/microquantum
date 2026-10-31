@@ -176,6 +176,29 @@ def qft_qpe() -> dict:
     return r
 
 
+def vqe() -> dict:
+    """Demo F (S6): VQE-style variational loop, journaled parameter
+    checkpoints, rollback to best-so-far via time travel.
+
+    Classical simulation of quantum math — no hardware, no speedup;
+    expectations are exact from the state vector, never sampled."""
+    from .vqe import run_vqe
+
+    print("=== Demo F: VQE-style variational loop (S6) ===")
+    root = DATA / "vqe"
+    if root.exists():
+        shutil.rmtree(root)
+    r = run_vqe(root)
+    print(f"  iterations (energy evaluations): {r['iterations']}")
+    print(f"  best energy: {r['best_energy']:.6f} at iteration {r['best_iteration']}")
+    print(f"  exact ground energy: {r['exact_ground_energy']:.6f} "
+          f"(gap {r['best_energy'] - r['exact_ground_energy']:.6f})")
+    print(f"  start energy: {r['start_energy']:.6f}; final evaluated energy: {r['final_energy']:.6f}")
+    print(f"  rollback to best-so-far verified: {r['rollback_verified']}")
+    print(f"  journal length: {r['journal_length']} entries; hash chain verifies: {r['journal_chain_verify']}")
+    return r
+
+
 if __name__ == "__main__":
     bell()
     print()
@@ -186,3 +209,5 @@ if __name__ == "__main__":
     grover_nedb()
     print()
     qft_qpe()
+    print()
+    vqe()
