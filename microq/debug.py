@@ -9,9 +9,9 @@ by re-running gates from scratch when a checkpoint exists. Inspection
 never mutates the passed circuit: its state and journal are only read.
 
 Storeless circuits: there is no checkpoint store to restore from, so
-:func:`inspect_at` / :func:`diff_states` raise ``ValueError`` rather
-than silently falling back to replaying gates. Qubit 0 is the MSB,
-matching ``microq.state`` / ``microq.circuit``.
+:func:`inspect_at` / :func:`diff_states` / :func:`find_divergence`
+raise ``ValueError`` rather than silently falling back to replaying
+gates. Qubit 0 is the MSB, matching ``microq.state`` / ``microq.circuit``.
 """
 from __future__ import annotations
 
@@ -144,3 +144,131 @@ def diff_states(circuit, seq_a: int, seq_b: int) -> dict:
             "per_amplitude": per_amplitude,
             "amplitude_deltas": amp_deltas, "prob_deltas": prob_deltas,
             "largest_movers": movers[:_TOP_K]}
+
+
+def _gate_at(circuit, seq: int) -> dict | None:
+    """Copy of the journal entry at `seq` (1-based), or None."""
+    if 1 <= seq <= len(circuit.journal):
+        return dict(circuit.journal[seq - 1])
+    return None
+
+
+def find_divergence(circuit_a, circuit_b, tolerance: float = 1e-9) -> dict:
+    """Binary-search the first journal seq where two circuits diverge.
+
+    Compares the states of two store-backed circuits at the same journal
+    ``seq`` (checkpoint restore via :func:`_state_at` only; neither
+    circuit is mutated, no gate is re-run). States diverge at a seq when
+    their fidelity |<psi_a|psi_b>|^2 is ``< 1 - tolerance``. Equal state
+    hashes are a fast path to fidelity 1.0, but the divergence decision
+    is always the fidelity comparison, never hash inequality alone (a
+    hash difference within `tolerance` still reports no divergence).
+
+    The search over the common prefix ``0..min(len_a, len_b)`` is a real
+    binary search (log-step probing). It assumes divergence, once
+    present, persists to the end of the common prefix: under that
+    assumption the returned seq is the first divergent one, and the seq
+    before it is verified within tolerance. If two states diverged and
+    then *reconverged* within tolerance, the search could in theory
+    miss the transient divergence or report a later seq — no stronger
+    guarantee is claimed.
+
+    Returns a dict with ``diverged``, ``seq`` (None when no divergence),
+    ``fidelity`` (at the divergent seq, or at the final compared seq
+    when none; None for the length-mismatch case, where there is no
+    counterpart state to compare), ``state_hash_a`` / ``state_hash_b``,
+    ``gate_a`` / ``gate_b`` (journal entries at ``seq``), ``suspect_gate``
+    (the entry at ``seq`` from `circuit_b`, falling back to `circuit_a`
+    if b has none; None when there is no divergence or ``seq == 0``),
+    ``length_a`` / ``length_b`` / ``lengths``, ``tolerance``, and
+    ``reason`` / ``message``.
+
+    Differing lengths with an identical common prefix diverge at
+    ``seq = min_len + 1``: the suspect is the first extra gate of the
+    longer circuit. ``seq == 0`` means the genesis states themselves
+    differ (e.g. a fork, whose genesis is its fork-point state).
+    Different qubit counts and storeless circuits raise ``ValueError``.
+    """
+    if not 0.0 <= tolerance < 1.0:
+        raise ValueError(f"tolerance must be in [0, 1), got {tolerance!r}")
+    if circuit_a.n != circuit_b.n:
+        raise ValueError(
+            f"states incomparable: {circuit_a.n} vs {circuit_b.n} qubits")
+    for c in (circuit_a, circuit_b):
+        if c.store is None:
+            raise ValueError(
+                "find_divergence needs JournalStore-backed circuits: "
+                "states are restored from checkpoints, and a storeless "
+                "circuit has none")
+    len_a, len_b = len(circuit_a.journal), len(circuit_b.journal)
+    min_len = min(len_a, len_b)
+    base = {"length_a": len_a, "length_b": len_b,
+            "lengths": (len_a, len_b), "tolerance": tolerance}
+
+    def fidelity_at(seq):
+        psi_a, hash_a = _state_at(circuit_a, seq)
+        psi_b, hash_b = _state_at(circuit_b, seq)
+        if hash_a == hash_b:
+            return 1.0, hash_a, hash_b
+        fid = float(abs(np.vdot(psi_a, psi_b)) ** 2)
+        return min(1.0, max(0.0, fid)), hash_a, hash_b
+
+    def result(diverged, seq, fidelity, hash_a, hash_b, reason):
+        gate_a = _gate_at(circuit_a, seq) if seq else None
+        gate_b = _gate_at(circuit_b, seq) if seq else None
+        suspect = None
+        if diverged and seq:
+            suspect = gate_b if gate_b is not None else gate_a
+        return {**base, "diverged": diverged, "seq": seq,
+                "fidelity": fidelity, "state_hash_a": hash_a,
+                "state_hash_b": hash_b, "gate_a": gate_a,
+                "gate_b": gate_b, "suspect_gate": suspect,
+                "reason": reason, "message": reason}
+
+    # Genesis (seq 0) is checked explicitly: genesis states can differ
+    # (e.g. a fork's genesis is its fork-point state, not |0...0>).
+    fid0, ha0, hb0 = fidelity_at(0)
+    if fid0 < 1.0 - tolerance:
+        return result(True, 0, fid0, ha0, hb0,
+                      "genesis states (seq 0) already diverge: "
+                      f"fidelity {fid0:.6g} < 1 - tolerance")
+    # Covers min_len == 0 too: fid_end is then the (agreeing) genesis
+    # fidelity, so equal lengths report no divergence and differing
+    # lengths fall into the length-mismatch case at seq 1.
+    fid_end, ha_end, hb_end = fidelity_at(min_len)
+    if fid_end >= 1.0 - tolerance:
+        if len_a == len_b:
+            return result(False, None, fid_end, ha_end, hb_end,
+                          "no divergence: states agree within tolerance "
+                          f"at every compared seq (final fidelity "
+                          f"{fid_end:.6g} at seq {min_len})")
+        seq = min_len + 1
+        longer_c = circuit_b if len_b > len_a else circuit_a
+        longer = "b" if len_b > len_a else "a"
+        reason = (f"length mismatch: common prefix (0..{min_len}) never "
+                  f"diverges but lengths differ ({len_a} vs {len_b}); "
+                  f"first extra gate is circuit_{longer} seq {seq}")
+        out = result(True, seq, None,
+                     _state_at(circuit_a, seq)[1] if len_a >= seq else None,
+                     _state_at(circuit_b, seq)[1] if len_b >= seq else None,
+                     reason)
+        out["suspect_gate"] = _gate_at(longer_c, seq)
+        return out
+
+    # Binary search: invariant seq `lo` is within tolerance (seq 0 was
+    # verified above) and seq `hi` diverges (min_len verified above).
+    lo, hi = 0, min_len
+    fid_hi, ha_hi, hb_hi = fid_end, ha_end, hb_end
+    while hi - lo > 1:
+        mid = (lo + hi) // 2
+        fid_mid, ha_mid, hb_mid = fidelity_at(mid)
+        if fid_mid < 1.0 - tolerance:
+            hi, fid_hi, ha_hi, hb_hi = mid, fid_mid, ha_mid, hb_mid
+        else:
+            lo = mid
+    gate = _gate_at(circuit_b, hi) or _gate_at(circuit_a, hi) or {}
+    return result(True, hi, fid_hi, ha_hi, hb_hi,
+                  f"first divergence at seq {hi} (gate "
+                  f"{gate.get('gate')} on {gate.get('targets')}): "
+                  f"fidelity {fid_hi:.6g} < 1 - tolerance; seq {lo} "
+                  f"verified within tolerance")
