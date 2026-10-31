@@ -77,8 +77,11 @@ entry schema and hash chain (`JournalStore.backend` reports which).
 - `microq/journal.py` — JSONL journal + content-addressed checkpoints,
   hash-chain verification.
 - `microq/demos.py` — Bell state, GHZ-5, Grover search over 16 "records",
-  plus Demo D: Grover over records stored in NEDB (S4).
+  Demo D: Grover over records stored in NEDB (S4), plus Demo E:
+  QFT + quantum phase estimation (S5).
 - `microq/search.py` — S4 NEDB record store + data-driven Grover search.
+- `microq/qft.py` — S5 QFT / inverse QFT + quantum phase estimation,
+  built from journaled H/CP/SWAP gates (CP added to `circuit.py`).
 - `tests/test_microq.py` — pytest suite (see SLICE1-RESULTS.md).
 
 ## Backends (S3)
@@ -124,6 +127,23 @@ faster than the simulated search — there is no quantum speedup here;
 the point is an oracle that is genuinely data-driven from NEDB, on a
 fully journaled, replay-verifiable circuit.
 
+## QFT + phase estimation (S5)
+
+`microq/qft.py` adds `qft` / `inverse_qft` (H + controlled-phase CP +
+SWAP, all journaled — CP is a new journaled `Circuit` gate,
+`diag(1, 1, 1, exp(i*theta))`) and `phase_estimation(root, phi,
+n_count=3)`, which estimates the phase of `U = diag(1, exp(2*pi*i*phi))`
+on its eigenstate |1>: counting register in superposition,
+controlled-`U**(2**k)` as CP gates, then the inverse QFT. It returns
+the true and estimated phi, the peak counting bitstring and its
+probability, the full counting-register probabilities, the journal
+length, and replay / hash-chain verification. Demo E
+(`python -m microq.demos`) shows a QFT→inverse-QFT round trip and
+recovers phi = 3/8 exactly at n_count = 3. The engine's qubit 0 is the
+MSB; the tests verify the QFT unitary against the direct DFT matrix
+and the QPE bit ordering empirically rather than assuming a
+convention. Still classical simulation: no hardware, no speedup.
+
 ## Run it
 
 ```bash
@@ -144,7 +164,8 @@ python -m pytest tests/ -q
    restores checkpoints; expose `get_as_of` provenance queries next).
 4. Checkpoint striding (checkpoint every k gates + replay-forward on
    rewind) once circuits get long enough that per-gate checkpoints hurt.
-5. More algorithms as journaled demos (QFT, phase estimation), each with
-   replay proofs.
+5. ~~More algorithms as journaled demos (QFT, phase estimation)~~ —
+   done in S5 (see above; each with replay proofs). Further algorithms
+   remain welcome as journaled demos.
 6. Variational loop (VQE-style) with journaled parameter checkpoints
    and rollback to best-so-far via time travel.

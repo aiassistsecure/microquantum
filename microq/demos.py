@@ -147,6 +147,35 @@ def grover_nedb(target_tag: str = "gold", iterations: int = 3):
     return r
 
 
+def qft_qpe() -> dict:
+    """Demo E (S5): QFT round trip + QPE for phi=3/8, journaled.
+
+    Classical simulation of quantum math — no hardware, no speedup."""
+    from .qft import inverse_qft, phase_estimation, qft
+
+    print("=== Demo E: QFT + quantum phase estimation (S5) ===")
+    c = Circuit(3, store=_fresh_store("qft"))
+    qft(c, [0, 1, 2])
+    probs = c.probabilities()
+    print(f"  QFT of |000>: uniform over 8 outcomes "
+          f"(each P = {probs['000']:.4f}): {all(abs(v - 0.125) < 1e-9 for v in probs.values())}")
+    inverse_qft(c, [0, 1, 2])
+    print(f"  inverse QFT round trip: P(|000>) = {c.probabilities()['000']:.4f}")
+    print(f"  QFT circuit journal length: {len(c.journal)} entries; replay: {c.replay()}")
+
+    root = DATA / "phase_estimation"
+    if root.exists():
+        shutil.rmtree(root)
+    r = phase_estimation(root, 3 / 8, n_count=3)
+    print(f"  QPE: true phi = {r['true_phi']:.4f}; estimated phi = {r['estimated_phi']:.4f} "
+          f"(peak bitstring {r['peak_bitstring']})")
+    print(f"  QPE peak probability: {r['peak_probability']:.4f}")
+    print(f"  QPE journal length: {r['journal_length']} entries")
+    print(f"  QPE replay() reproduces final state: {r['replay']}")
+    print(f"  QPE journal hash chain verifies: {r['journal_chain_verify']}")
+    return r
+
+
 if __name__ == "__main__":
     bell()
     print()
@@ -155,3 +184,5 @@ if __name__ == "__main__":
     grover()
     print()
     grover_nedb()
+    print()
+    qft_qpe()
