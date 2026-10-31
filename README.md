@@ -69,6 +69,8 @@ entry schema and hash chain (`JournalStore.backend` reports which).
 
 ## Layout
 
+- `microq/backend.py` — S3 backend interface: `NumpyBackend` (default)
+  and import-guarded `CupyBackend`, resolution via `get_backend`.
 - `microq/state.py` — state-vector engine (H, X, Y, Z, S, T, S†, T†,
   RX/RY/RZ, CNOT, CZ, SWAP via reshape/tensordot), sampling, fidelity.
 - `microq/circuit.py` — journaled Circuit: apply, rewind, fork, replay.
@@ -76,6 +78,31 @@ entry schema and hash chain (`JournalStore.backend` reports which).
   hash-chain verification.
 - `microq/demos.py` — Bell state, GHZ-5, Grover search over 16 "records".
 - `tests/test_microq.py` — pytest suite (see SLICE1-RESULTS.md).
+
+## Backends (S3)
+
+Gate math runs behind `microq.backend.Backend` (`apply_1q` / `apply_2q` /
+`cnot` / `cz` / `swap`, plus `zeros` / `from_numpy` / `to_numpy` transfer
+helpers). `Circuit` and the journal API are unchanged; checkpoints and
+hashes always use host NumPy arrays.
+
+```python
+from microq import Circuit
+c = Circuit(2, backend="numpy")   # default, CPU
+c = Circuit(2, backend="cupy")    # CuPy/CUDA on a GPU host (e.g. V100)
+```
+
+- `backend="cupy"` when CuPy or a CUDA device is unavailable **raises
+  `BackendUnavailableError`** — it never silently pretends to be on GPU.
+  Pass `backend_fallback=True` for an explicit fallback: the returned
+  backend is NumPy with `is_fallback=True` and `requested_name="cupy"`.
+- The CuPy backend is import-guarded; on hosts without CuPy its tests
+  skip cleanly. Do not `pip install cupy` on a CPU-only host expecting
+  it to work.
+- **V100 performance is UNMEASURED.** No GPU benchmark has been run for
+  this project; any V100 number would be fabricated, so none is given.
+  This remains classical simulation — a GPU backend only runs the same
+  linear algebra faster, it is not quantum hardware.
 
 ## Run it
 
@@ -89,7 +116,8 @@ python -m pytest tests/ -q
 
 ## What's next
 
-1. CuPy/CUDA backend for the V100 (same backend surface, device arrays).
+1. ~~CuPy/CUDA backend for the V100~~ — done in S3 (see Backends above;
+   V100 numbers UNMEASURED until run at the box).
 2. NEDB AS OF / TRACE reads surfaced in the circuit API (rewind already
    restores checkpoints; expose `get_as_of` provenance queries next).
 3. Checkpoint striding (checkpoint every k gates + replay-forward on

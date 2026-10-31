@@ -1,11 +1,14 @@
-"""State-vector engine: n-qubit complex128 state, gates via reshape/transpose.
+"""State-vector engine: n-qubit complex128 state, gates via a backend.
 
-Classical simulation of quantum math on NumPy. Honest framing: no quantum
-hardware is involved; this is linear algebra.
+Classical simulation of quantum math. Honest framing: no quantum
+hardware is involved; this is linear algebra on NumPy (default) or,
+when available on a GPU host, CuPy — V100 performance is UNMEASURED.
 """
 from __future__ import annotations
 
 import numpy as np
+
+from .backend import Backend, get_backend
 
 # --- Single-qubit gates -------------------------------------------------
 I2 = np.eye(2, dtype=np.complex128)
@@ -52,65 +55,67 @@ def gate_matrix(name: str, params: tuple[float, ...] = ()) -> np.ndarray:
 
 
 class StateVector:
-    """An n-qubit pure state. Qubit 0 is the most-significant index bit."""
+    """An n-qubit pure state. Qubit 0 is the most-significant index bit.
 
-    def __init__(self, n_qubits: int, state: np.ndarray | None = None):
+    ``psi`` is a backend array (NumPy by default, CuPy on a GPU host).
+    Use :meth:`to_numpy` for a guaranteed host array (journal, hashing).
+    """
+
+    def __init__(self, n_qubits: int, state=None, backend="numpy",
+                 backend_fallback: bool = False):
         if n_qubits < 1:
             raise ValueError("need at least 1 qubit")
         self.n = n_qubits
+        self.backend: Backend = get_backend(backend, backend_fallback=backend_fallback)
         if state is None:
-            self.psi = np.zeros(2**n_qubits, dtype=np.complex128)
+            self.psi = self.backend.zeros(2**n_qubits)
             self.psi[0] = 1.0
         else:
-            psi = np.asarray(state, dtype=np.complex128)
+            host = self.backend.to_numpy(state) if not isinstance(state, np.ndarray) else state
+            psi = np.asarray(host, dtype=np.complex128)
             if psi.shape != (2**n_qubits,):
                 raise ValueError("state shape mismatch")
-            self.psi = psi.copy()
+            self.psi = self.backend.from_numpy(psi.copy())
+
+    @property
+    def backend_name(self) -> str:
+        return self.backend.name
+
+    def to_numpy(self) -> np.ndarray:
+        return self.backend.to_numpy(self.psi)
 
     def copy(self) -> "StateVector":
-        return StateVector(self.n, self.psi)
+        return StateVector(self.n, self.to_numpy(), backend=self.backend)
 
-    # -- gate application ------------------------------------------------
+    # -- gate application (delegated to the backend) ---------------------
     def apply_1q(self, gate: np.ndarray, target: int) -> None:
-        """Apply a 2x2 gate to `target` via reshape + tensordot."""
         if not 0 <= target < self.n:
             raise ValueError("target out of range")
-        t = self.psi.reshape([2] * self.n)
-        t = np.tensordot(gate, t, axes=([1], [target]))
-        t = np.moveaxis(t, 0, target)
-        self.psi = t.reshape(-1)
+        self.psi = self.backend.apply_1q(self.psi, gate, target, self.n)
 
     def apply_2q(self, gate4: np.ndarray, a: int, b: int) -> None:
-        """Apply a 4x4 gate acting on qubits (a, b), a = control/high bit."""
         if a == b or not (0 <= a < self.n and 0 <= b < self.n):
             raise ValueError("bad 2-qubit targets")
-        t = self.psi.reshape([2] * self.n)
-        g = gate4.reshape(2, 2, 2, 2)
-        t = np.tensordot(g, t, axes=([2, 3], [a, b]))
-        # tensordot puts the two output axes first, in order (a-out, b-out)
-        t = np.moveaxis(t, [0, 1], [a, b])
-        self.psi = t.reshape(-1)
+        self.psi = self.backend.apply_2q(self.psi, gate4, a, b, self.n)
 
     def cnot(self, control: int, target: int) -> None:
-        gate = np.zeros((4, 4), dtype=np.complex128)
-        gate[0, 0] = gate[1, 1] = 1.0  # control 0: identity on target
-        gate[3, 2] = gate[2, 3] = 1.0  # control 1: X on target
-        self.apply_2q(gate, control, target)
+        if control == target or not (0 <= control < self.n and 0 <= target < self.n):
+            raise ValueError("bad 2-qubit targets")
+        self.psi = self.backend.cnot(self.psi, control, target, self.n)
 
     def cz(self, a: int, b: int) -> None:
-        gate = np.diag([1, 1, 1, -1]).astype(np.complex128)
-        self.apply_2q(gate, a, b)
+        if a == b or not (0 <= a < self.n and 0 <= b < self.n):
+            raise ValueError("bad 2-qubit targets")
+        self.psi = self.backend.cz(self.psi, a, b, self.n)
 
     def swap(self, a: int, b: int) -> None:
-        gate = np.array(
-            [[1, 0, 0, 0], [0, 0, 1, 0], [0, 1, 0, 0], [0, 0, 0, 1]],
-            dtype=np.complex128,
-        )
-        self.apply_2q(gate, a, b)
+        if a == b or not (0 <= a < self.n and 0 <= b < self.n):
+            raise ValueError("bad 2-qubit targets")
+        self.psi = self.backend.swap(self.psi, a, b, self.n)
 
     # -- observation -----------------------------------------------------
     def probabilities(self) -> np.ndarray:
-        return np.abs(self.psi) ** 2
+        return np.abs(self.to_numpy()) ** 2
 
     def prob_dict(self) -> dict[str, float]:
         fmt = f"0{self.n}b"
@@ -127,7 +132,7 @@ class StateVector:
         return dict(sorted(counts.items()))
 
     def fidelity(self, other: "StateVector") -> float:
-        return float(abs(np.vdot(self.psi, other.psi)) ** 2)
+        return float(abs(np.vdot(self.to_numpy(), other.to_numpy())) ** 2)
 
     def norm(self) -> float:
-        return float(np.linalg.norm(self.psi))
+        return float(np.linalg.norm(self.to_numpy()))
