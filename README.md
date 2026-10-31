@@ -113,7 +113,32 @@ but records no hash chain, so its `trace` reports `verified` as
 - `microq/vqe.py` — S6 VQE-style variational loop: RY/CNOT ansatz,
   exact expectations, NumPy Nelder–Mead, journaled parameter
   checkpoints in NEDB, rollback to best-so-far via rewind.
+- `microq/debug.py` — D1 debugger inspection core: `inspect_at` /
+  `diff_states` over journaled states (see Debugger below).
 - `tests/test_microq.py` — pytest suite (see SLICE1-RESULTS.md).
+
+## Debugger (D1)
+
+`microq/debug.py` is the inspection core of the debugger line:
+
+- `inspect_at(circuit, seq)` — the full state at journal `seq`:
+  per-qubit reduced density matrices, Bloch vectors, and entanglement
+  entropies (von Neumann, bits), the full probability distribution,
+  and the top amplitudes. `seq == 0` is genesis |0...0>; out-of-range
+  raises `ValueError`.
+- `diff_states(circuit, seq_a, seq_b)` — fidelity
+  (|⟨psi_a|psi_b⟩|^2), per-amplitude / per-probability deltas, and
+  the largest movers between two journal points.
+
+States are obtained by **checkpoint restore** (`store.get_checkpoint`
+on the journal entry's `state_hash`, the genesis checkpoint for
+`seq 0`), never by re-running gates when a checkpoint exists, and
+inspection never mutates the circuit. A storeless circuit has no
+checkpoints to restore, so both functions raise `ValueError` for one
+rather than silently replaying. Limits, stated plainly: this is
+classical state-vector simulation (no quantum hardware), inspection
+costs the same exponential memory as the state itself, and V100
+performance is UNMEASURED.
 
 ## Backends (S3)
 
