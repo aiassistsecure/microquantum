@@ -119,7 +119,10 @@ class JournalStore:
             with open(self.journal_path, "a") as f:
                 f.write(json.dumps(entry) + "\n")
 
-    def append(self, gate: str, targets: list[int], params: list[float], psi: np.ndarray) -> dict:
+    def append(self, gate: str, targets: list[int], params: list[float], psi: np.ndarray,
+               checkpoint: bool = True) -> dict:
+        # checkpoint=False still records state_hash(psi); only the
+        # checkpoint blob write is skipped (checkpoint striding).
         seq = len(self.entries) + 1
         prev_hash = self.entries[-1]["entry_hash"] if self.entries else "0" * 64
         entry = {
@@ -127,7 +130,7 @@ class JournalStore:
             "gate": gate,
             "targets": list(targets),
             "params": list(params),
-            "state_hash": self.put_checkpoint(psi),
+            "state_hash": self.put_checkpoint(psi) if checkpoint else state_hash(psi),
             "prev_hash": prev_hash,
             "timestamp": time.time(),
         }

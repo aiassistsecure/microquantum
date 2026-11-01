@@ -155,13 +155,15 @@ but records no hash chain, so its `trace` reports `verified` as
   Neumann entropy in bits rises above a threshold). Comparisons
   carry a 1e-12 float tolerance at the boundary.
 
-States are obtained by **checkpoint restore** (`store.get_checkpoint`
-on the journal entry's `state_hash`, the genesis checkpoint for
-`seq 0`), never by re-running gates when a checkpoint exists, and
-inspection never mutates either circuit. A storeless circuit has no
-checkpoints to restore, so all three functions raise `ValueError`
-for one rather than silently replaying. Circuits with different
-qubit counts also raise `ValueError` (states incomparable).
+States are obtained via `circuit.state_at(seq)`: **checkpoint
+restore preferred** (the nearest stored checkpoint at or before
+`seq`, the genesis checkpoint for `seq 0`), replaying only the
+stride gap after it — never re-running from scratch when a
+checkpoint exists — and inspection never mutates either circuit.
+A storeless circuit has no checkpoints to restore, so all three
+functions raise `ValueError` for one rather than silently
+replaying from scratch. Circuits with different qubit counts also
+raise `ValueError` (states incomparable).
 
 `find_divergence` behaviour at the edges, stated plainly:
 
@@ -240,7 +242,8 @@ python -m microq inspect data/bell --seq 1
   Reopening note: a fresh `Circuit` over a reopened store starts
   with an empty journal mirror, so `load_circuit` restores the
   mirror from the store's entries; the qubit count is derived from
-  the head checkpoint's dimension, and seq 0 assumes the standard
+  the nearest checkpointed entry's dimension (the head may carry no
+  blob under striding), and seq 0 assumes the standard
   |0...0> genesis.
 
 What this proves — and what it does not: the demo proves the D1–D3
@@ -249,6 +252,20 @@ approximation) with a clean no-bug control. It does not scale past
 state-vector limits: this is classical state-vector simulation
 (no quantum hardware, no speedup), cost grows as 2^n amplitudes,
 and V100 performance is UNMEASURED.
+
+## Checkpoint striding
+
+`Circuit(n, store=store, checkpoint_every=k)` (default `k=1`) persists
+a checkpoint blob only for journal seqs divisible by `k`; every entry
+still records its `state_hash` and the hash chain is unchanged, and
+stride 1 is exactly the original per-gate behaviour (all state hashes
+unchanged). The genesis state is always checkpointed. `rewind`,
+`fork`, and the debugger (`inspect_at` / `diff_states` /
+`find_divergence`, via `circuit.state_at(seq)`) resolve any seq by
+restoring the nearest checkpoint at or before it and replaying at
+most `k-1` gates forward. The honest saving is the count: far fewer
+checkpoint blobs than journal entries on long circuits — no speed
+claim is made (performance is UNMEASURED).
 
 ## Backends (S3)
 
@@ -345,8 +362,8 @@ python -m pytest tests/ -q
    (see Provenance reads above; journal-seq `entry_as_of` / `as_of`
    and `trace`, chain-verified prefixes, never conflated with NEDB's
    global op seq).
-4. Checkpoint striding (checkpoint every k gates + replay-forward on
-   rewind) once circuits get long enough that per-gate checkpoints hurt.
+4. ~~Checkpoint striding (checkpoint every k gates + replay-forward on
+   rewind)~~ — done (see Checkpoint striding below).
 5. ~~More algorithms as journaled demos (QFT, phase estimation)~~ —
    done in S5 (see above; each with replay proofs). Further algorithms
    remain welcome as journaled demos.

@@ -2,10 +2,12 @@
 
 Classical state-vector simulation only — no quantum hardware.
 
-Design: the state at any journal ``seq`` is obtained by *checkpoint
-restore* — ``store.get_checkpoint(state_hash)`` using the hash recorded
-in that journal entry (the genesis checkpoint for ``seq == 0``) — never
-by re-running gates from scratch when a checkpoint exists. Inspection
+Design: the state at any journal ``seq`` is obtained via
+:meth:`Circuit.state_at` — *checkpoint restore preferred*: the nearest
+stored checkpoint at or before ``seq`` (the genesis checkpoint for
+``seq == 0``, always kept) is loaded, and only the stride gap after it
+(fewer than ``checkpoint_every`` gates) is replay-forwarded; states are
+never re-run from scratch when a checkpoint exists. Inspection
 never mutates the passed circuit: its state and journal are only read.
 
 Storeless circuits: there is no checkpoint store to restore from, so
@@ -25,7 +27,12 @@ _TOP_K = 5
 
 
 def _state_at(circuit, seq: int) -> tuple[np.ndarray, str]:
-    """(psi, state_hash) at journal `seq` via checkpoint restore."""
+    """(psi, state_hash) at journal `seq`.
+
+    Resolved via :meth:`Circuit.state_at`: checkpoint restore is
+    preferred and only the stride gap (< ``checkpoint_every`` gates)
+    after the nearest checkpoint is replay-forwarded — never a
+    re-run from scratch when a checkpoint exists."""
     JournalStore._check_journal_seq(seq, len(circuit.journal))
     if circuit.store is None:
         raise ValueError(
@@ -41,7 +48,7 @@ def _state_at(circuit, seq: int) -> tuple[np.ndarray, str]:
     else:
         h = circuit.journal[seq - 1]["state_hash"]
     try:
-        psi = np.array(circuit.store.get_checkpoint(h), dtype=np.complex128)
+        psi = np.array(circuit.state_at(seq), dtype=np.complex128)
     except FileNotFoundError as exc:
         raise ValueError(f"no checkpoint stored for state at seq {seq}") from exc
     return psi, h
