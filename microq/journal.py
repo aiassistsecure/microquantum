@@ -49,22 +49,42 @@ class JournalStore:
 
     backend = "nedb" if HAS_NEDB else "jsonl"
 
+    #: D3 breakpoint events live here — NOT journal entries: own
+    #: sequence, gate entries / hash chain / schema untouched.
+    DEBUG_EVENTS_COLLECTION = "debug_events"
+
     def __init__(self, root: str | Path):
         self.root = Path(root)
         self.ckpt_dir = self.root / "checkpoints"
         self.ckpt_dir.mkdir(parents=True, exist_ok=True)
         self.journal_path = self.root / "journal.jsonl"
+        self.debug_events_path = self.root / "debug_events.jsonl"
         self.entries: list[dict] = []
+        self.debug_events: list[dict] = []
         self.db = None
         if HAS_NEDB:
             self.db = NEDB(str(self.root / "nedb"))
             self._load_from_nedb()
+            seq = 1
+            while True:
+                doc = self.db.get(self.DEBUG_EVENTS_COLLECTION, str(seq))
+                if doc is None:
+                    break
+                self.debug_events.append(
+                    {k: v for k, v in doc.items() if not k.startswith("_")})
+                seq += 1
         elif self.journal_path.exists():
             with open(self.journal_path) as f:
                 for line in f:
                     line = line.strip()
                     if line:
                         self.entries.append(json.loads(line))
+            if self.debug_events_path.exists():
+                with open(self.debug_events_path) as f:
+                    for line in f:
+                        line = line.strip()
+                        if line:
+                            self.debug_events.append(json.loads(line))
 
     def _load_from_nedb(self) -> None:
         seq = 1
@@ -115,6 +135,28 @@ class JournalStore:
         self._persist(entry)
         self.entries.append(entry)
         return entry
+
+    # -- debug events (D3 breakpoints; separate from the gate journal) ---
+    def record_debug_event(self, event: dict) -> dict:
+        """Persist one breakpoint event in `debug_events` (NEDB) or
+        `debug_events.jsonl` (fallback) under its own `event_seq`;
+        the gate journal is never touched, so verify/replay/AS OF/
+        TRACE are unaffected. Returns the stored event (a copy)."""
+        stored = dict(event)
+        stored["event_seq"] = len(self.debug_events) + 1
+        stored.setdefault("timestamp", time.time())
+        if self.db is not None:
+            self.db.put(self.DEBUG_EVENTS_COLLECTION,
+                        str(stored["event_seq"]), dict(stored))
+        else:
+            with open(self.debug_events_path, "a") as f:
+                f.write(json.dumps(stored) + "\n")
+        self.debug_events.append(stored)
+        return dict(stored)
+
+    def get_debug_events(self) -> list[dict]:
+        """All recorded breakpoint events, in `event_seq` order."""
+        return [dict(e) for e in self.debug_events]
 
     def import_entry(self, entry: dict) -> None:
         """Persist an existing entry unchanged (used by fork to inherit the

@@ -114,11 +114,11 @@ but records no hash chain, so its `trace` reports `verified` as
   exact expectations, NumPy Nelder–Mead, journaled parameter
   checkpoints in NEDB, rollback to best-so-far via rewind.
 - `microq/debug.py` — debugger core: `inspect_at` / `diff_states`
-  (D1) and `find_divergence` bisection (D2) over journaled states
-  (see Debugger below).
+  (D1), `find_divergence` bisection (D2), and `run_with_watchpoints`
+  breakpoints (D3) over journaled states (see Debugger below).
 - `tests/test_microq.py` — pytest suite (see SLICE1-RESULTS.md).
 
-## Debugger (D1–D2)
+## Debugger (D1–D3)
 
 `microq/debug.py` is the core of the debugger line:
 
@@ -139,6 +139,18 @@ but records no hash chain, so its `trace` reports `verified` as
   presumed mutated circuit; falling back to `circuit_a` if b has no
   such entry) — so a planted wrong angle or wrong target is named
   directly, not just located approximately.
+- `run_with_watchpoints(circuit, steps, conditions)` (D3) —
+  **breakpoints / watchpoints**: applies `steps` (gate specs as
+  tuples like `("RY", 1, 0.5)` / `("CNOT", (0, 1))`, or dicts like
+  `{"gate": "RY", "targets": [1], "params": [0.5]}`) through
+  `Circuit.apply`, so every gate is journaled normally, and after
+  each gate evaluates every condition against the resulting state.
+  Three reusable, describable condition types: `ProbabilityWatch`
+  (trip when P(|bitstring>) reaches a threshold),
+  `FidelityWatch` (trip when fidelity vs a target state drops
+  below a threshold), and `EntropyWatch` (trip when a qubit's von
+  Neumann entropy in bits rises above a threshold). Comparisons
+  carry a 1e-12 float tolerance at the boundary.
 
 States are obtained by **checkpoint restore** (`store.get_checkpoint`
 on the journal entry's `state_hash`, the genesis checkpoint for
@@ -168,10 +180,28 @@ qubit counts also raise `ValueError` (states incomparable).
   tolerance, the search could miss the transient divergence or
   report a later seq — no stronger guarantee is claimed.
 
+D3 halt semantics, stated plainly: on the first tripped condition
+the run halts immediately — remaining steps are never applied, so
+the gate journal's length equals the tripped `seq` — and the result
+carries `tripped=True`, that `seq`, the tripped condition with its
+observed value, and the full `inspect_at` report at that seq. With
+no trip, all steps run: `tripped=False, seq=None`, final observed
+values. A trip records exactly one breakpoint event as its **own
+entry kind, outside the gate journal**: the store's `debug_events`
+collection (NEDB) or `debug_events.jsonl` file, under its own
+`event_seq`, referencing the journal seq, condition, observed
+value, and state hash — gate entries, hash chain, `verify_chain()`,
+`replay()`, and AS OF / TRACE are completely unaffected (tested).
+A storeless circuit keeps events in an in-memory
+`circuit.debug_events` list; its trip report is built from the live
+state (no checkpoint to restore). Invalid conditions, thresholds,
+or bitstrings raise `ValueError` before any gate is applied.
+
 Limits, stated plainly: this is classical state-vector simulation
 (no quantum hardware), inspection and comparison cost the same
-exponential memory as the state itself, and V100 performance is
-UNMEASURED.
+exponential memory as the state itself, watchpoint evaluation adds
+a per-gate reduced-state cost at the same scale, and V100
+performance is UNMEASURED.
 
 ## Backends (S3)
 
