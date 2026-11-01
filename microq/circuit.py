@@ -8,18 +8,28 @@ import numpy as np
 from .journal import JournalStore, state_hash
 from .state import StateVector, gate_matrix
 
-CHECKPOINT_EVERY = 1  # slice 1: checkpoint every step (cheap at demo scale);
-# a stride (e.g. every 16) drops in here without changing the API.
+CHECKPOINT_EVERY = 1  # default stride: checkpoint every gate; a larger
+# stride is chosen per-circuit via ``Circuit(checkpoint_every=k)``.
 
 
 class Circuit:
     def __init__(self, n_qubits: int, store: JournalStore | None = None,
                  _state: StateVector | None = None, backend="numpy",
-                 backend_fallback: bool = False):
+                 backend_fallback: bool = False, checkpoint_every: int = 1):
         """``backend``: "numpy" (default) or "cupy". Requesting cupy when
         unavailable raises BackendUnavailableError unless
         ``backend_fallback=True`` (explicit NumPy fallback, never silent).
-        Journal/checkpoints always store host NumPy arrays."""
+        Journal/checkpoints always store host NumPy arrays.
+
+        ``checkpoint_every`` (positive int, default 1): persist a state
+        checkpoint blob only for journal seqs divisible by it. Genesis
+        is always checkpointed; stride 1 is the original behaviour."""
+        if isinstance(checkpoint_every, bool) \
+                or not isinstance(checkpoint_every, int) \
+                or checkpoint_every < 1:
+            raise ValueError(
+                f"checkpoint_every must be a positive int, got {checkpoint_every!r}")
+        self.checkpoint_every = checkpoint_every
         self.n = n_qubits
         self.store = store
         self.state = _state or StateVector(n_qubits, backend=backend,
@@ -42,7 +52,10 @@ class Circuit:
     # -- gate application (journaled) --------------------------------------
     def _record(self, gate: str, targets: list[int], params: tuple[float, ...] = ()) -> dict:
         if self.store is not None:
-            entry = self.store.append(gate, targets, list(params), self.state.to_numpy())
+            seq = len(self.store.entries) + 1  # the seq append will assign
+            entry = self.store.append(
+                gate, targets, list(params), self.state.to_numpy(),
+                checkpoint=(seq % self.checkpoint_every == 0))
         else:
             seq = len(self.journal) + 1
             entry = {
@@ -56,14 +69,19 @@ class Circuit:
         self.journal.append(entry)
         return entry
 
-    def apply(self, gate: str, *targets: int, params: tuple[float, ...] = ()) -> "Circuit":
+    @staticmethod
+    def _apply_gate(state: StateVector, gate: str, targets, params=()) -> None:
+        """Apply one gate to `state` in place (no journaling). Shared by
+        :meth:`apply` and by replay-forward in :meth:`state_at`."""
         gate = gate.upper()
+        targets = list(targets)
+        params = tuple(params)
         if gate in ("CNOT", "CX"):
             if len(targets) != 2:
                 raise ValueError("CNOT needs (control, target)")
-            self.state.cnot(targets[0], targets[1])
+            state.cnot(targets[0], targets[1])
         elif gate == "CZ":
-            self.state.cz(targets[0], targets[1])
+            state.cz(targets[0], targets[1])
         elif gate == "CP":
             if len(targets) != 2:
                 raise ValueError("CP needs (control, target)")
@@ -71,15 +89,53 @@ class Circuit:
                 raise ValueError("CP needs exactly one angle param (theta)")
             theta = float(params[0])
             mat = np.diag([1, 1, 1, np.exp(1j * theta)]).astype(np.complex128)
-            self.state.apply_2q(mat, targets[0], targets[1])
+            state.apply_2q(mat, targets[0], targets[1])
         elif gate == "SWAP":
-            self.state.swap(targets[0], targets[1])
+            state.swap(targets[0], targets[1])
         else:
             if len(targets) != 1:
                 raise ValueError(f"{gate} needs exactly one target")
-            self.state.apply_1q(gate_matrix(gate, params), targets[0])
+            state.apply_1q(gate_matrix(gate, params), targets[0])
+
+    def apply(self, gate: str, *targets: int, params: tuple[float, ...] = ()) -> "Circuit":
+        gate = gate.upper()
+        self._apply_gate(self.state, gate, targets, params)
         self._record(gate, list(targets), params)
         return self
+
+    # -- state resolution (checkpoint restore + replay-forward) ----------
+    def state_at(self, seq: int) -> np.ndarray:
+        """Host NumPy state at journal `seq` (0 = genesis).
+
+        Restores the nearest stored checkpoint at or before `seq`
+        (genesis is always checkpointed) and replay-forwards the
+        remaining journal gates (at most ``checkpoint_every - 1`` of
+        them under striding) onto a scratch state, without journaling.
+        Storeless circuits and out-of-range seqs raise ValueError."""
+        if self.store is None:
+            raise ValueError("state_at needs a persistent JournalStore")
+        JournalStore._check_journal_seq(seq, len(self.journal))
+        base, psi = 0, None
+        for c in range(seq, -1, -1):
+            if c == 0:
+                h = getattr(self, "_genesis_hash", None)
+                if h is not None and self.store.has_checkpoint(h):
+                    psi = self.store.get_checkpoint(h)
+                else:  # genesis is |0...0> by construction
+                    psi = np.zeros(2 ** self.n, dtype=np.complex128)
+                    psi[0] = 1.0
+                base = 0
+                break
+            h = self.journal[c - 1]["state_hash"]
+            if self.store.has_checkpoint(h):
+                psi, base = self.store.get_checkpoint(h), c
+                break
+        scratch = StateVector(self.n, np.asarray(psi, dtype=np.complex128),
+                              backend=self.state.backend)
+        for pos in range(base + 1, seq + 1):
+            e = self.journal[pos - 1]
+            self._apply_gate(scratch, e["gate"], e["targets"], tuple(e["params"]))
+        return scratch.to_numpy()
 
     # Convenience wrappers
     def h(self, q: int): return self.apply("H", q)
@@ -156,11 +212,11 @@ class Circuit:
         return self.journal[seq - 1]["state_hash"]
 
     def rewind(self, seq: int) -> "Circuit":
-        """Restore the checkpointed state at journal seq (0 = |0...0>)."""
+        """Restore the state at journal seq (0 = |0...0>), resolving
+        non-checkpoint seqs via :meth:`state_at` replay-forward."""
         if self.store is None:
             raise ValueError("rewind needs a persistent JournalStore")
-        h = self._checkpoint_hash_at(seq)
-        psi = self.store.get_checkpoint(h)
+        psi = self.state_at(seq)
         self.state = StateVector(self.n, psi, backend=self.state.backend)
         self.journal = self.journal[:seq]
         return self
@@ -175,12 +231,13 @@ class Circuit:
             psi = self.state.to_numpy().copy()
             hist = list(self.journal)
         else:
-            psi = self.store.get_checkpoint(self._checkpoint_hash_at(seq))
+            psi = self.state_at(seq)
             hist = list(self.journal[:seq])
         child_store_root = Path(self.store.root) / f"fork-{len(list(Path(self.store.root).glob('fork-*')))}-{seq if seq is not None else 'head'}"
         child_store = JournalStore(child_store_root)
         child = Circuit(self.n, store=child_store,
-                        _state=StateVector(self.n, psi, backend=self.state.backend))
+                        _state=StateVector(self.n, psi, backend=self.state.backend),
+                        checkpoint_every=self.checkpoint_every)
         child.journal = hist
         for e in hist:  # fork history is the parent's chain prefix, persisted
             child_store.import_entry(e)

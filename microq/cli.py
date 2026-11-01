@@ -128,16 +128,20 @@ def load_circuit(journal_path) -> Circuit:
     store = JournalStore(path)
     if not store.entries:
         raise ValueError(f"journal is empty: {journal_path}")
-    head_hash = store.entries[-1]["state_hash"]
-    try:
-        psi = store.get_checkpoint(head_hash)
-    except FileNotFoundError as exc:
+    # Under checkpoint striding the head entry may have no blob: derive
+    # n from the nearest checkpointed entry, scanning backwards.
+    psi = None
+    for entry in reversed(store.entries):
+        if store.has_checkpoint(entry["state_hash"]):
+            psi = store.get_checkpoint(entry["state_hash"])
+            break
+    if psi is None:
         raise ValueError(
-            f"head checkpoint missing for journal: {journal_path}") from exc
+            f"no checkpointed entry found for journal: {journal_path}")
     dim = int(psi.shape[0]) if psi.ndim == 1 else 0
     if dim < 2 or (dim & (dim - 1)) != 0:
         raise ValueError(
-            f"head checkpoint dimension {dim} is not a power of two "
+            f"checkpoint dimension {dim} is not a power of two "
             f"(journal: {journal_path})")
     n = int(math.log2(dim))
     circuit = Circuit(n, store=store)
