@@ -116,9 +116,12 @@ but records no hash chain, so its `trace` reports `verified` as
 - `microq/debug.py` — debugger core: `inspect_at` / `diff_states`
   (D1), `find_divergence` bisection (D2), and `run_with_watchpoints`
   breakpoints (D3) over journaled states (see Debugger below).
+- `microq/cli.py` — D4 proof demo + CLI: `debug_demo`,
+  `inspect_journal` / `load_circuit`, and the `python -m microq`
+  entry point (`microq/__main__.py`).
 - `tests/test_microq.py` — pytest suite (see SLICE1-RESULTS.md).
 
-## Debugger (D1–D3)
+## Debugger (D1–D4)
 
 `microq/debug.py` is the core of the debugger line:
 
@@ -202,6 +205,50 @@ Limits, stated plainly: this is classical state-vector simulation
 exponential memory as the state itself, watchpoint evaluation adds
 a per-gate reduced-state cost at the same scale, and V100
 performance is UNMEASURED.
+
+### Proof demo + CLI (D4)
+
+`microq/cli.py` wraps the debugger in two commands (run from the
+repo root; `python -m microq` is `microq/__main__.py`):
+
+```bash
+python -m microq debug-demo
+python -m microq inspect data/bell            # head seq
+python -m microq inspect data/bell --seq 1
+```
+
+- `debug-demo` is the proof demo: it builds a known-good 2-qubit
+  circuit — H(0), RY(1, 0.5), CNOT(0, 1), RY(0, 0.25), with gates
+  after the mutation so bisection is meaningful — and a mutated
+  twin that changes **only** the seq-2 RY angle to 1.1, each in its
+  own fresh journal store. `find_divergence` must bisect to exactly
+  seq 2 and name RY on qubit 1 with params [1.1] (expected [0.5]),
+  and an identical-twin control pair must report no divergence.
+  The command prints that verdict (gate, targets, expected vs
+  actual params, fidelity, and the control line) and exits 0 only
+  when the bug is found at the exact gate **and** the control is
+  clean; otherwise it says so plainly and exits nonzero. The same
+  check is available in Python as `microq.cli.debug_demo()`.
+- `inspect <journal>` reopens a stored journal (a store root with
+  `nedb/` + `checkpoints/`, or the JSONL fallback) and prints the
+  D1 `inspect_at` report human-readably: seq, qubit count, state
+  hash, top amplitudes, the full probabilities, and per-qubit Bloch
+  vectors + entanglement entropies. `--seq N` selects an earlier
+  journal point (default: the head). A missing path, an empty
+  journal, or an out-of-range seq prints a clean error to stderr
+  and exits 2. In Python: `microq.cli.inspect_journal(path, seq)`.
+  Reopening note: a fresh `Circuit` over a reopened store starts
+  with an empty journal mirror, so `load_circuit` restores the
+  mirror from the store's entries; the qubit count is derived from
+  the head checkpoint's dimension, and seq 0 assumes the standard
+  |0...0> genesis.
+
+What this proves — and what it does not: the demo proves the D1–D3
+machinery works end to end on a planted bug (exact gate, not an
+approximation) with a clean no-bug control. It does not scale past
+state-vector limits: this is classical state-vector simulation
+(no quantum hardware, no speedup), cost grows as 2^n amplitudes,
+and V100 performance is UNMEASURED.
 
 ## Backends (S3)
 
